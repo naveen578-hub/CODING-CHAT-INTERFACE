@@ -1,10 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Code, Bot, User, Loader } from 'lucide-react';
 
 const CodingChatInterface = () => {
     const [messages, setMessages] = useState([
         {
-            id: 1,
+            id: `bot-init-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             type: 'bot',
             content: "Hi! I'm your coding assistant. Ask me anything about programming, algorithms, debugging, or software development!",
             timestamp: new Date()
@@ -13,6 +13,8 @@ const CodingChatInterface = () => {
     const [inputMessage, setInputMessage] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef(null);
+    const isMountedRef = useRef(true);
+    const abortControllerRef = useRef(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -21,6 +23,16 @@ const CodingChatInterface = () => {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    // Cleanup effect to prevent memory leaks
+    useEffect(() => {
+        return () => {
+            isMountedRef.current = false;
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
+        };
+    }, []);
 
     // Simulated AI response function (replace with actual API call)
     const getAIResponse = async (userMessage) => {
@@ -162,8 +174,12 @@ Feel free to share code snippets and I'll help you improve them!`;
     const handleSendMessage = async () => {
         if (!inputMessage.trim() || isLoading) return;
 
+        // Create abort controller for this request
+        abortControllerRef.current = new AbortController();
+
+        const userMessageId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const userMessage = {
-            id: Date.now(),
+            id: userMessageId,
             type: 'user',
             content: inputMessage,
             timestamp: new Date()
@@ -176,8 +192,12 @@ Feel free to share code snippets and I'll help you improve them!`;
         try {
             const aiResponse = await getAIResponse(inputMessage);
 
+            // Check if component is still mounted before updating state
+            if (!isMountedRef.current) return;
+
+            const botMessageId = `bot-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
             const botMessage = {
-                id: Date.now() + 1,
+                id: botMessageId,
                 type: 'bot',
                 content: aiResponse,
                 timestamp: new Date()
@@ -185,15 +205,22 @@ Feel free to share code snippets and I'll help you improve them!`;
 
             setMessages(prev => [...prev, botMessage]);
         } catch (error) {
+            // Check if component is still mounted and error is not due to abort
+            if (!isMountedRef.current || error.name === 'AbortError') return;
+
+            const errorMessageId = `bot-error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
             const errorMessage = {
-                id: Date.now() + 1,
+                id: errorMessageId,
                 type: 'bot',
                 content: "Sorry, I encountered an error processing your request. Please try again.",
                 timestamp: new Date()
             };
             setMessages(prev => [...prev, errorMessage]);
         } finally {
-            setIsLoading(false);
+            // Only update loading state if component is still mounted
+            if (isMountedRef.current) {
+                setIsLoading(false);
+            }
         }
     };
 
@@ -204,7 +231,7 @@ Feel free to share code snippets and I'll help you improve them!`;
         }
     };
 
-    const formatMessage = (content) => {
+    const formatMessage = useCallback((content) => {
         // Simple code block formatting
         const parts = content.split(/```(\w+)?\n?([\s\S]*?)```/);
 
@@ -229,7 +256,7 @@ Feel free to share code snippets and I'll help you improve them!`;
                 );
             }
         });
-    };
+    }, []); // Empty dependency array since function doesn't depend on any props or state
 
     return (
         <div className="flex flex-col h-screen bg-gray-50">
