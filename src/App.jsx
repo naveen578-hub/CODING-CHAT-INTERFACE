@@ -34,141 +34,42 @@ const CodingChatInterface = () => {
         };
     }, []);
 
-    // Simulated AI response function (replace with actual API call)
-    const getAIResponse = async (userMessage) => {
-        // Simulate API delay
-        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+    // Streams a reply from the backend, which proxies to the Claude API.
+    // Calls onDelta(text) for each incoming chunk so the UI can render incrementally.
+    const streamAIResponse = async (history, onDelta, signal) => {
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: history }),
+            signal,
+        });
 
-        const lowerMessage = userMessage.toLowerCase();
-
-        // Simple pattern matching for demo purposes
-        if (lowerMessage.includes('react') || lowerMessage.includes('jsx')) {
-            return `Here's a React example:
-
-\`\`\`jsx
-import React, { useState } from 'react';
-
-function MyComponent() {
-    const [count, setCount] = useState(0);
-    
-    return (
-    <div>
-        <p>Count: {count}</p>
-        <button onClick={() => setCount(count + 1)}>
-        Increment
-        </button>
-    </div>
-    );
-}
-\`\`\`
-
-This demonstrates basic React hooks and state management. The \`useState\` hook allows you to add state to functional components.`;
+        if (!response.ok || !response.body) {
+            throw new Error(`Chat request failed with status ${response.status}`);
         }
 
-        if (lowerMessage.includes('python') || lowerMessage.includes('algorithm')) {
-            return `Here's a Python algorithm example:
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-\`\`\`python
-def binary_search(arr, target):
-    left, right = 0, len(arr) - 1
-    
-    while left <= right:
-        mid = (left + right) // 2
-        
-        if arr[mid] == target:
-            return mid
-        elif arr[mid] < target:
-            left = mid + 1
-        else:
-            right = mid - 1
-    
-    return -1
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-# Usage
-numbers = [1, 3, 5, 7, 9, 11, 13]
-index = binary_search(numbers, 7)
-print(f"Found at index: {index}")
-\`\`\`
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop(); // keep the last, possibly incomplete, chunk
 
-This binary search algorithm has O(log n) time complexity and efficiently finds elements in sorted arrays.`;
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const payload = line.slice(6);
+                if (payload === '[DONE]') return;
+
+                const parsed = JSON.parse(payload);
+                if (parsed.error) throw new Error(parsed.error);
+                if (parsed.delta) onDelta(parsed.delta);
+            }
         }
-
-        if (lowerMessage.includes('javascript') || lowerMessage.includes('js')) {
-            return `Here's a useful JavaScript pattern:
-
-\`\`\`javascript
-// Async/await with error handling
-async function fetchUserData(userId) {
-    try {
-    const response = await fetch(\`/api/users/\${userId}\`);
-    
-    if (!response.ok) {
-        throw new Error(\`HTTP error! status: \${response.status}\`);
-    }
-    
-    const userData = await response.json();
-    return userData;
-    } catch (error) {
-    console.error('Error fetching user data:', error);
-    throw error;
-    }
-}
-
-// Usage with proper error handling
-fetchUserData(123)
-.then(user => console.log(user))
-.catch(err => console.error('Failed to load user:', err));
-\`\`\`
-
-This shows modern JavaScript async patterns with proper error handling.`;
-        }
-
-        if (lowerMessage.includes('debug') || lowerMessage.includes('error')) {
-            return `Here are some debugging strategies:
-
-**1. Console Logging:**
-\`\`\`javascript
-console.log('Variable value:', myVar);
-console.table(arrayData); // For arrays/objects
-console.trace(); // Shows call stack
-\`\`\`
-
-**2. Browser DevTools:**
-- Set breakpoints in Sources tab
-- Use Network tab for API issues
-- Check Console for errors
-
-**3. Common Error Patterns:**
-- Null/undefined reference errors
-- Async timing issues
-- Scope problems with closures
-- Type mismatches
-
-**4. Debugging Steps:**
-1. Reproduce the issue consistently
-2. Isolate the problem area
-3. Add logging/breakpoints
-4. Test assumptions step by step
-
-What specific error are you encountering?`;
-        }
-
-        // Default response
-        return `I understand you're asking about: "${userMessage}"
-
-I'm a coding assistant that can help with:
-• Programming languages (JavaScript, Python, React, etc.)
-• Algorithms and data structures
-• Debugging and troubleshooting
-• Code reviews and best practices
-• Architecture and design patterns
-
-Could you provide more specific details about what you'd like help with? For example:
-- What programming language?
-- What's the specific problem you're trying to solve?
-- Are you getting any error messages?
-
-Feel free to share code snippets and I'll help you improve them!`;
     };
 
     const handleSendMessage = async () => {
@@ -185,25 +86,29 @@ Feel free to share code snippets and I'll help you improve them!`;
             timestamp: new Date()
         };
 
+        const history = [...messages, userMessage]
+            .filter(m => m.type === 'user' || m.type === 'bot')
+            .map(m => ({ role: m.type, content: m.content }));
+
         setMessages(prev => [...prev, userMessage]);
         setInputMessage('');
         setIsLoading(true);
 
+        const botMessageId = `bot-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        let botMessageAdded = false;
+
         try {
-            const aiResponse = await getAIResponse(inputMessage);
+            await streamAIResponse(history, (delta) => {
+                if (!isMountedRef.current) return;
 
-            // Check if component is still mounted before updating state
-            if (!isMountedRef.current) return;
-
-            const botMessageId = `bot-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-            const botMessage = {
-                id: botMessageId,
-                type: 'bot',
-                content: aiResponse,
-                timestamp: new Date()
-            };
-
-            setMessages(prev => [...prev, botMessage]);
+                setMessages(prev => {
+                    if (!botMessageAdded) {
+                        botMessageAdded = true;
+                        return [...prev, { id: botMessageId, type: 'bot', content: delta, timestamp: new Date() }];
+                    }
+                    return prev.map(m => m.id === botMessageId ? { ...m, content: m.content + delta } : m);
+                });
+            }, abortControllerRef.current.signal);
         } catch (error) {
             // Check if component is still mounted and error is not due to abort
             if (!isMountedRef.current || error.name === 'AbortError') return;
